@@ -1,0 +1,46 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Compiled libraries
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.Python
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated outputs
+RTDLite/out.txt

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "cmake"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "RTDLite"
+version = "0.1.0"
+description = "Relative Topological Distance (RTD-Lite) for two distance matrices"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.7"
+dependencies = ["numpy", "torch"]
+authors = [
+    {name = "Eduard Tulchinskii", email = "tulchinskyi@yandex.ru"},
+    {name = "Daria Voronkova"},
+    {name = "Ilya Trofimov"},
+    {name = "Serguei Barannikov"}
+]
+keywords = ["topology", "TDA", "TSP", "MST", "barcode"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
+]
