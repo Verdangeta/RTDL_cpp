@@ -8,11 +8,79 @@ import scipy.sparse as sps
 import os
 import platform
 import pathlib
+import ctypes.util
 import torch
 import torch.nn as nn
 
 from copy import deepcopy
 from sklearn.metrics import pairwise_distances
+
+
+def _native_lib_candidates():
+    """
+    Return candidate native library filenames and glob patterns by OS.
+    Supports both historical and current naming conventions.
+    """
+    system = platform.system()
+    if system == "Windows":
+        # Keep compatibility with direct DLL loading.
+        return ["rtd_lite.dll", "librtd_lite.dll", "rtd_lite*.pyd", "rtd_lite*.dll"]
+    if system == "Darwin":
+        return ["rtd_lite.dylib", "librtd_lite.dylib", "rtd_lite*.dylib", "librtd_lite*.dylib"]
+    # Linux and other Unix-like systems.
+    return ["rtd_lite.so", "librtd_lite.so", "rtd_lite*.so", "librtd_lite*.so"]
+
+
+def _load_rtd_lite_library():
+    """
+    Load RTD-Lite native library from package directory with robust fallback.
+    """
+    module_dir = pathlib.Path(__file__).resolve().parent
+    candidates = []
+    seen = set()
+
+    for pattern in _native_lib_candidates():
+        # If pattern has wildcard, expand it; otherwise treat as direct file.
+        if any(ch in pattern for ch in "*?[]"):
+            expanded = sorted(module_dir.glob(pattern))
+            for path in expanded:
+                key = str(path)
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(path)
+        else:
+            path = module_dir / pattern
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(path)
+
+    load_errors = []
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            return ctypes.cdll.LoadLibrary(str(path))
+        except OSError as exc:
+            load_errors.append(f"{path}: {exc}")
+
+    # Optional system-level fallback by soname.
+    for libname in ("rtd_lite", "librtd_lite"):
+        found = ctypes.util.find_library(libname)
+        if not found:
+            continue
+        try:
+            return ctypes.cdll.LoadLibrary(found)
+        except OSError as exc:
+            load_errors.append(f"{found}: {exc}")
+
+    searched = ", ".join(str(p) for p in candidates)
+    errors = "\n".join(load_errors) if load_errors else "No compatible library file found."
+    raise RuntimeError(
+        "Could not load RTD-Lite native library.\n"
+        f"Searched in: {searched}\n"
+        f"Load errors:\n{errors}"
+    )
 
 
 def run(cloud_1 = None, cloud_2 = None): 
@@ -32,21 +100,7 @@ def run(cloud_1 = None, cloud_2 = None):
     #if matrix_1:
     prog = None
 
-    path = str(pathlib.Path(__file__).with_name('rtd_lite.so'))
-    if platform.system() == 'Windows':
-        path = str(pathlib.Path(__file__).with_name('rtd_lite.dll'))
-    if platform.system() == 'Darwin':
-        path = str(pathlib.Path(__file__).with_name('rtd_lite.dylib'))
-
-    if None != path:
-        prog = ctypes.cdll.LoadLibrary(path)
-    else:
-        if platform.system() == "Windows":
-            raise Exception("Could not locate rtd_lite.dll file, please check README.md for details.")
-        elif platform.system() == "Darwin":
-            raise Exception("Could not locate rtd_lite.dylib file, please check README.md for details.")
-        else:
-            raise Exception("Could not locate rtd_lite.so file, please check README.md for details.")
+    prog = _load_rtd_lite_library()
 
     rank = convert(prog, file_name, matrix_1, matrix_2)
     return rank
@@ -81,21 +135,7 @@ def prim_algo_simplified(adjacency_matrix):
 class RTD_Lite:
     def __init__(self, r1, r2, quant_outer=None, quant_inner=None, distance='euclidean'):
         self.prog = None
-        
-        path = str(pathlib.Path(__file__).with_name('rtd_lite.so'))
-        if platform.system() == 'Windows':
-            path = str(pathlib.Path(__file__).with_name('rtd_lite.dll'))
-        if platform.system() == 'Darwin':
-            path = str(pathlib.Path(__file__).with_name('rtd_lite.dylib'))
-        if None != path:
-            self.prog = ctypes.cdll.LoadLibrary(path)
-        else:
-            if platform.system() == "Windows":
-                raise Exception("Could not locate rtd_lite.dll file, please check README.md for details.")
-            elif platform.system() == "Darwin":
-                raise Exception("Could not locate rtd_lite.dylib file, please check README.md for details.")
-            else:
-                raise Exception("Could not locate rtd_lite.so file, please check README.md for details.")
+        self.prog = _load_rtd_lite_library()
         
         if distance == 'euclidean':
             dists_1 = torch.cdist(r1, r1)
