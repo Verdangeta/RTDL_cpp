@@ -1,4 +1,5 @@
 #include "rtdlite.h"
+#include "link_cut_tree.h"
 #include <iostream>
 #include <cstdint>
 #include <vector>
@@ -13,6 +14,8 @@
 #include <limits>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
+#include <chrono>
 
 using namespace std;
 
@@ -239,29 +242,87 @@ class RTD_Lite {
         }
 
     private:
-        /**
-         * Internal method: Run RTD-Lite algorithm with precomputed MSTs.
-         * 
-         * @param rmin_edge_idx rmin MST edges
-         * @param rmin_edge_w rmin MST edge weights
-         * @param r1_edge_idx r1 MST edges (already sorted)
-         * @param r1_edge_w r1 MST edge weights (already sorted)
-         */
-        void run_with_r1_mst(vector<vector<int>> &rmin_edge_idx, vector<value_t> &rmin_edge_w,
-                            vector<vector<int>> &r1_edge_idx, vector<value_t> &r1_edge_w) {
-            vector<vector<int>> r2_edge_idx(n - 1, vector<int>(2));
-            vector<value_t> r2_edge_w(n - 1);
-            prim_algo(r2, r2_edge_idx, r2_edge_w);
+        bool env_flag_enabled(const char *name) const {
+            const char *env = getenv(name);
+            if (env == nullptr || env[0] == '\0') {
+                return false;
+            }
+            string value(env);
+            return value != "0" && value != "false" && value != "False" &&
+                   value != "FALSE" && value != "off" && value != "OFF";
+        }
 
-            sort_edges_weights(rmin_edge_idx, rmin_edge_w);
-            // r1_edge_idx and r1_edge_w are already sorted when passed
-            sort_edges_weights(r2_edge_idx, r2_edge_w);
+        bool fast_barcode_enabled() const {
+            return env_flag_enabled("RTDL_FAST_BARCODE");
+        }
 
-            DSU min_graph_dsu(n);
+        bool timing_enabled() const {
+            return env_flag_enabled("RTDL_TIMING");
+        }
 
+        int bench_repeat_count() const {
+            const char *env = getenv("RTDL_BENCH_REPEAT");
+            if (env == nullptr || env[0] == '\0') {
+                return 1;
+            }
+            int repeat = atoi(env);
+            return max(repeat, 1);
+        }
+
+        void reset_regular_barcodes() {
             barcodes_idx["1->2"] = vector<vector<int>>(n - 1, vector<int>(4));
             // Allocate space for n-1 regular barcodes + 1 potential max TSP edge
             barcodes_idx["2->1"] = vector<vector<int>>(n, vector<int>(4));
+        }
+
+        double seconds_since(chrono::steady_clock::time_point start) const {
+            return chrono::duration<double>(chrono::steady_clock::now() - start).count();
+        }
+
+        double median_seconds(vector<double> values) const {
+            if (values.empty()) {
+                return 0.0;
+            }
+            size_t mid = values.size() / 2;
+            nth_element(values.begin(), values.begin() + mid, values.end());
+            double median = values[mid];
+            if (values.size() % 2 == 0) {
+                nth_element(values.begin(), values.begin() + mid - 1, values.end());
+                median = 0.5 * (median + values[mid - 1]);
+            }
+            return median;
+        }
+
+        bool mst_is_supported_by_fast(const vector<vector<int>> &edge_idx, const vector<value_t> &edge_w) const {
+            if ((int)edge_idx.size() != max(n - 1, 0) || (int)edge_w.size() != max(n - 1, 0)) {
+                return false;
+            }
+            for (int i = 0; i < n - 1; ++i) {
+                int u = edge_idx[i][0];
+                int v = edge_idx[i][1];
+                if (u < 0 || u >= n || v < 0 || v >= n || u == v || !isfinite(edge_w[i])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        void write_barcode_if_alive(vector<vector<int>> &target, int birth_pos,
+                                    const vector<vector<int>> &birth_edge_idx, const vector<value_t> &birth_edge_w,
+                                    const vector<vector<int>> &death_edge_idx, const vector<value_t> &death_edge_w,
+                                    int death_pos) {
+            value_t birth = birth_edge_w[birth_pos];
+            value_t death = death_edge_w[death_pos];
+            if (death > birth) {
+                target[birth_pos] = vector<int>{birth_edge_idx[birth_pos][0], birth_edge_idx[birth_pos][1],
+                                                death_edge_idx[death_pos][0], death_edge_idx[death_pos][1]};
+            }
+        }
+
+        void compute_pairs_naive(vector<vector<int>> &rmin_edge_idx, vector<value_t> &rmin_edge_w,
+                                 vector<vector<int>> &r1_edge_idx, vector<value_t> &r1_edge_w,
+                                 vector<vector<int>> &r2_edge_idx, vector<value_t> &r2_edge_w) {
+            DSU min_graph_dsu(n);
 
             for (int i = 0; i < n - 1; i++) {
                 int u_clique = min_graph_dsu.find(rmin_edge_idx[i][0]);
@@ -308,7 +369,119 @@ class RTD_Lite {
                 }
                 min_graph_dsu.unite(rmin_edge_idx[i][0], rmin_edge_idx[i][1]);
             }
+        }
 
+        bool compute_direction_fast(const vector<vector<int>> &rmin_edge_idx, const vector<value_t> &rmin_edge_w,
+                                    const vector<vector<int>> &death_edge_idx, const vector<value_t> &death_edge_w,
+                                    vector<vector<int>> &target) {
+            if (n <= 1) {
+                return true;
+            }
+
+            LinkCutTree lct(n, max(3 * n, n));
+            vector<int> birth_edge_node(n - 1, -1);
+            vector<int> node_to_birth(max(2 * n - 1, n), -1);
+
+            for (int i = 0; i < n - 1; ++i) {
+                int edge_node = lct.add_node(i);
+                node_to_birth[edge_node] = i;
+                birth_edge_node[i] = edge_node;
+                lct.link(edge_node, rmin_edge_idx[i][0]);
+                lct.link(edge_node, rmin_edge_idx[i][1]);
+            }
+
+            for (int j = 0; j < n - 1; ++j) {
+                int u = death_edge_idx[j][0];
+                int v = death_edge_idx[j][1];
+                LinkCutTree::PathMax path_max = lct.query_path_max(u, v);
+                int birth_pos = (path_max.node >= 0 && path_max.node < (int)node_to_birth.size())
+                                    ? node_to_birth[path_max.node] : -1;
+                if (path_max.key < 0 || birth_pos < 0) {
+                    return false;
+                }
+
+                write_barcode_if_alive(target, birth_pos, rmin_edge_idx, rmin_edge_w,
+                                       death_edge_idx, death_edge_w, j);
+
+                int old_edge_node = birth_edge_node[birth_pos];
+                lct.cut(old_edge_node, rmin_edge_idx[birth_pos][0]);
+                lct.cut(old_edge_node, rmin_edge_idx[birth_pos][1]);
+
+                int death_edge_node = lct.add_node(LinkCutTree::NEG_KEY);
+                lct.link(death_edge_node, u);
+                lct.link(death_edge_node, v);
+            }
+
+            return true;
+        }
+
+        bool compute_pairs_fast(vector<vector<int>> &rmin_edge_idx, vector<value_t> &rmin_edge_w,
+                                vector<vector<int>> &r1_edge_idx, vector<value_t> &r1_edge_w,
+                                vector<vector<int>> &r2_edge_idx, vector<value_t> &r2_edge_w) {
+            if (!mst_is_supported_by_fast(rmin_edge_idx, rmin_edge_w) ||
+                !mst_is_supported_by_fast(r1_edge_idx, r1_edge_w) ||
+                !mst_is_supported_by_fast(r2_edge_idx, r2_edge_w)) {
+                return false;
+            }
+
+            if (!compute_direction_fast(rmin_edge_idx, rmin_edge_w, r1_edge_idx, r1_edge_w, barcodes_idx["1->2"])) {
+                return false;
+            }
+            if (!compute_direction_fast(rmin_edge_idx, rmin_edge_w, r2_edge_idx, r2_edge_w, barcodes_idx["2->1"])) {
+                return false;
+            }
+
+            return true;
+        }
+
+        /**
+         * Internal method: Run RTD-Lite algorithm with precomputed MSTs.
+         * 
+         * @param rmin_edge_idx rmin MST edges
+         * @param rmin_edge_w rmin MST edge weights
+         * @param r1_edge_idx r1 MST edges (already sorted)
+         * @param r1_edge_w r1 MST edge weights (already sorted)
+         */
+        void run_with_r1_mst(vector<vector<int>> &rmin_edge_idx, vector<value_t> &rmin_edge_w,
+                            vector<vector<int>> &r1_edge_idx, vector<value_t> &r1_edge_w) {
+            auto total_start = chrono::steady_clock::now();
+            auto setup_start = chrono::steady_clock::now();
+            vector<vector<int>> r2_edge_idx(n - 1, vector<int>(2));
+            vector<value_t> r2_edge_w(n - 1);
+            prim_algo(r2, r2_edge_idx, r2_edge_w);
+
+            sort_edges_weights(rmin_edge_idx, rmin_edge_w);
+            // r1_edge_idx and r1_edge_w are already sorted when passed
+            sort_edges_weights(r2_edge_idx, r2_edge_w);
+            double setup_sec = seconds_since(setup_start);
+
+            bool requested_fast = fast_barcode_enabled();
+            bool used_fast = requested_fast;
+            bool fallback_to_naive = false;
+            int repeats = timing_enabled() ? bench_repeat_count() : 1;
+            vector<double> pair_times;
+            pair_times.reserve(repeats);
+
+            for (int rep = 0; rep < repeats; ++rep) {
+                reset_regular_barcodes();
+                auto pair_start = chrono::steady_clock::now();
+                if (requested_fast) {
+                    bool ok = compute_pairs_fast(rmin_edge_idx, rmin_edge_w, r1_edge_idx, r1_edge_w, r2_edge_idx, r2_edge_w);
+                    if (!ok) {
+                        reset_regular_barcodes();
+                        compute_pairs_naive(rmin_edge_idx, rmin_edge_w, r1_edge_idx, r1_edge_w, r2_edge_idx, r2_edge_w);
+                        used_fast = false;
+                        fallback_to_naive = true;
+                    }
+                } else {
+                    compute_pairs_naive(rmin_edge_idx, rmin_edge_w, r1_edge_idx, r1_edge_w, r2_edge_idx, r2_edge_w);
+                    used_fast = false;
+                }
+                pair_times.push_back(seconds_since(pair_start));
+            }
+            double pair_sec = median_seconds(pair_times);
+
+            auto tsp_tail_start = chrono::steady_clock::now();
             // Find maximum edge in r2 (partial tour) - similar to max_TSP_row_col in Python
             // Mask out inf values (set to -inf) to find maximum among finite values
             value_t max_r2_value = -1.0;
@@ -387,6 +560,23 @@ class RTD_Lite {
                     }
                     barcodes_idx["2->1"][n - 1] = vector<int>{birth_edge_i, birth_edge_j, max_r2_i, max_r2_j};
                 }
+            }
+            double tsp_tail_sec = seconds_since(tsp_tail_start);
+
+            if (timing_enabled()) {
+                cerr << fixed << setprecision(9)
+                     << "RTDL_TIMING"
+                     << ",n=" << n
+                     << ",mode=" << (used_fast ? "fast" : "naive")
+                     << ",requested=" << (requested_fast ? "fast" : "naive")
+                     << ",fallback=" << (fallback_to_naive ? 1 : 0)
+                     << ",repeat=" << repeats
+                     << ",setup_sec=" << setup_sec
+                     << ",after_mst_median_sec=" << pair_sec
+                     << ",pair_median_sec=" << pair_sec
+                     << ",tsp_tail_sec=" << tsp_tail_sec
+                     << ",total_inside_sec=" << seconds_since(total_start)
+                     << endl;
             }
         }
 };
