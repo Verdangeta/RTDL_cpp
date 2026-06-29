@@ -4,6 +4,7 @@ dist/
 *.egg-info/
 *.egg
 *.md
+!README.md
 
 # Compiled libraries
 *.so
